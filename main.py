@@ -31,9 +31,30 @@ from forecasting_tools import (
     structure_output,
 )
 
+import os
+import google.generativeai as genai
+
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
+class GeminiLlm:
+    def __init__(self, model: str = "gemini-2.5-flash", temperature: float = 0.0, timeout: int = 30):
+        self.model = model
+        self.temperature = temperature
+        self.timeout = timeout
+
+    async def invoke(self, prompt: str) -> str:
+        # client is sync; run in thread to avoid blocking
+        resp = await asyncio.to_thread(
+            lambda: genai.chat.create(
+                model=self.model,
+                messages=[{"author": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+        )
+        # response text location may be resp.candidates[0].content
+        return resp.candidates[0].content
 
 class SpringTemplateBot2026(ForecastBot):
     """
@@ -673,17 +694,12 @@ if __name__ == "__main__":
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o", # "anthropic/claude-sonnet-4-20250514", etc (see docs for litellm)
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
+            "default": GeminiLlm(model="gemini-2.5-flash", temperature=0.2),
+            "summarizer": GeminiLlm(model="gemini-2.5-flash", temperature=0.2),
+            "researcher": "asknews/news-summaries",
+            "parser": GeminiLlm(model="gemini-2.5-flash", temperature=0.2),
+        },
     )
 
     client = MetaculusClient()
