@@ -1107,14 +1107,14 @@ if __name__ == "__main__":
         extra_metadata_in_explanation=True,
         llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
             "default": GeneralLlm(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-5-mini",
                 temperature=0.3,
                 timeout=40,
                 allowed_tries=2,
             ),
-            "summarizer": "openai/gpt-4o-mini",
+            "summarizer": "openai/gpt-5-mini",
             "researcher": "asknews/news-summaries",
-            "parser": "openai/gpt-4o-mini",
+            "parser": "openai/gpt-5-mini",
         },
     )
 
