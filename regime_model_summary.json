@@ -1,0 +1,42 @@
+{
+  "n_regimes": 2,
+  "transition_matrix": {
+    "0": {
+      "0": 0.9,
+      "1": 0.1
+    },
+    "1": {
+      "0": 0.1,
+      "1": 0.9
+    }
+  },
+  "regime_anchors": {
+    "0": {
+      "binary_default": 0.5,
+      "numeric_scale": 1.0,
+      "numeric_shift": 0.0,
+      "multiple_choice_confidence": 0.35,
+      "sample_size": 18,
+      "mean_forecast": 0.4722222222222222,
+      "std_forecast": 0.2402904620929418
+    },
+    "1": {
+      "binary_default": 0.5,
+      "numeric_scale": 1.0,
+      "numeric_shift": 0.0,
+      "multiple_choice_confidence": 0.35,
+      "sample_size": 14,
+      "mean_forecast": 0.3867857142857143,
+      "std_forecast": 0.16179359804190938
+    }
+  },
+  "training_questions": 32,
+  "training_timestamp": "2026-01-14T13:41:16.670472",
+  "feature_names": [
+    "community_forecast",
+    "volatility",
+    "age",
+    "activity",
+    "crowd_size"
+  ]
+}

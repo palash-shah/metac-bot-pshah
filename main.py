@@ -8,6 +8,9 @@ import threading
 import time
 from statistics import mean, pstdev
 
+import numpy as np
+import pickle
+
 
 from forecasting_tools import (
     AskNewsSearcher,
@@ -43,6 +46,98 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 _OPENAI_CLIENT = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def extract_features(question: MetaculusQuestion) -> np.ndarray:
+    """
+    Map a MetaculusQuestion into the 5D feature vector used by the spectral model.
+    This mirrors build_regime_params.py but works on MetaculusQuestion objects.
+    """
+
+    # We will construct a dict similar to what training used.
+    # 1) Community prediction series proxy
+    community_values: list[float] = []
+
+    # For binary questions, use single CP at access time if present (0-1 => 0-100)
+    if isinstance(question, BinaryQuestion) and question.community_prediction_at_access_time is not None:
+        community_values = [question.community_prediction_at_access_time * 100.0]
+
+    # Optional: if you later store a richer history in custom_metadata, use it here
+    try:
+        if not community_values and hasattr(question, "custom_metadata"):
+            cp_hist = question.custom_metadata.get("community_prediction_history", [])
+            if isinstance(cp_hist, list):
+                community_values = cp_hist
+    except Exception:
+        pass
+
+    # 2) Created / published time
+    created_str = ""
+    if getattr(question, "published_time", None) is not None:
+        created_str = question.published_time.isoformat()
+
+    # 3) Activity count proxy
+    activity_count = getattr(question, "num_predictions", None) or 0
+
+    # ---- Feature 1: community_forecast (0-1)
+    if community_values and len(community_values) > 0:
+        latest = community_values[-1]
+        community_forecast = latest / 100.0 if isinstance(latest, (int, float)) else 0.5
+    else:
+        community_forecast = 0.5
+    community_forecast = max(0.0, min(1.0, community_forecast))
+
+    # ---- Feature 2: volatility (0-1)
+    if community_values and len(community_values) > 3:
+        recent = np.array(community_values[-10:]) / 100.0
+        volatility = float(np.std(recent))
+        volatility = min(1.0, volatility)
+    else:
+        volatility = 0.1
+
+    # ---- Feature 3: age (0-1)
+    if created_str:
+        try:
+            created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+            age_days = (now - created).days
+            age = min(1.0, max(0.0, age_days / 365.0))
+        except Exception:
+            age = 0.5
+    else:
+        age = 0.5
+
+    # ---- Feature 4: activity (0-1)
+    if community_values and len(community_values) > 0:
+        activity = min(1.0, max(0.0, len(community_values) / 100.0))
+    else:
+        activity = 0.1
+
+    # ---- Feature 5: crowd_size (0-1)
+    crowd_size = min(1.0, max(0.0, activity_count / 50.0))
+
+    return np.array(
+        [community_forecast, volatility, age, activity, crowd_size],
+        dtype=np.float32,
+    )
+
+class RegimeModel:
+    """
+    Lightweight wrapper around the trained spectral clustering output
+    that provides a predict(X) method using nearest-cluster-center.
+    """
+
+    def __init__(self, cluster_centers: np.ndarray):
+        self.cluster_centers = np.asarray(cluster_centers, dtype=float)
+        if self.cluster_centers.ndim != 2:
+            raise ValueError("cluster_centers must be 2D (n_clusters, n_features)")
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=float)
+        # X: (n_samples, n_features)
+        # centers: (n_clusters, n_features)
+        diffs = X[:, None, :] - self.cluster_centers[None, :, :]
+        dists2 = np.sum(diffs * diffs, axis=2)
+        return np.argmin(dists2, axis=1)
 
 
 class GeminiLlm:
@@ -185,68 +280,69 @@ class SpringTemplateBot2026(ForecastBot):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # regime_state can track last regime for each question id
-        self._regime_state: dict[int, int] = {}
-        # P[a][b] = transition prob; load from file or hard‑code for now
-        self._regime_transition: dict[int, dict[int, float]] = {}
-        # optional: regime‑specific “anchor” forecasts
-        self._regime_anchors: dict[int, dict[str, float]] = {}
-        # do NOT touch client, rate limiter, etc.
-                # Example: 2 regimes, calm (0) and noisy (1)
-        self._regime_transition = {
-            0: {0: 0.9, 1: 0.1},
-            1: {0: 0.3, 1: 0.7},
-        }
 
-        # These anchors should be filled from your offline clustering
-        # (placeholder values shown)
-        self._regime_anchors[0] = {
-            "binary_default": 0.02,          # calm regime: near crowd 2%
-            "numeric_scale": 1.0,
-            "numeric_shift": 0.0,
-        }
-        self._regime_anchors[1] = {
-            "binary_default": 0.10,          # noisy regime: more uncertainty
-            "numeric_scale": 1.2,            # widen numeric distributions
-            "numeric_shift": 0.0,
-        }
+        # Existing init code (rate limiter, etc.) stays above or below as needed
+
+        # ---- Regime model loading ----
+        print("BOT INIT Loading regime model...")
+        try:
+            with open("regime_model.pkl", "rb") as f:
+                model_data = pickle.load(f)
+
+            # Keep spectral_model for reference but wrap centers for runtime prediction
+            self.spectral_model = model_data["spectral_model"]
+            self._regime_anchors = model_data["regime_anchors"]
+            self._regime_transition = model_data["transition_matrix"]
+            self.n_regimes = model_data.get("n_regimes", 2)
+            self.regimefeaturenames = model_data.get("feature_names", [])
+            self._regime_state: dict[str, int] = {}
+
+            cluster_centers = model_data.get("cluster_centers")
+            if cluster_centers is None:
+                raise ValueError("cluster_centers missing in regime_model.pkl; re-run build_regime_params.py")
+
+            self.regime_model = RegimeModel(cluster_centers)
+            print(f"BOT INIT Loaded regime model with {self.n_regimes} regimes")
+            print(f"BOT INIT Transition matrix {self._regime_transition}")
+        except FileNotFoundError:
+            print("BOT INIT regimemodel.pkl not found. Run buildregimeparams.py first.")
+            raise
+        except Exception as e:
+            print(f"BOT INIT Error loading regimemodel.pkl {e}")
+            raise
+
 
 
     ##################### REGIME MODEL HELPERS #######################
-    def _get_recent_community_series( ### NEED TO ADJUST TO MATCH API JSON AND CHANGE THE API OF METACULUSQUESTION CUSTOM METADATA FIELD TO COMMUNITY VOLATILITY SENTIMENT ###
-        self,
-        question: MetaculusQuestion,
-        max_points: int = 30,
-    ) -> list[float]:
-        """
-        Return up to max_points most recent community probabilities in [0,1]
-        for this question, using raw api_json.
-        """
-        q_json = question.api_json.get("question", {})
-        # Adjust this key path to match what you see in actual API JSON.
-        # Common patterns are something like "community_prediction", "cp_history", etc.
-        history = q_json.get("community_prediction_history") or []
-        if not history:
-            return []
-
-        # history items should have timestamp + value; sort and take last N
-        # e.g. [{"t": 1700000000, "cp": 0.12}, ...]
-        history = sorted(history, key=lambda h: h["t"])[-max_points:]
-        path = [float(h["cp"]) for h in history]
-        return path
     
     def _get_current_regime(self, question: MetaculusQuestion) -> int:
         """
-        Map question + community history into a discrete regime index.
-        This is where you call your spectral clustering classifier that
-        was trained offline on community prediction time series.
+        Detect current regime using the trained cluster centers.
         """
-        qid = question.page_url  # or question.page_url
-        # If you have a saved classifier:
-        # features = build_features_from_question(question)
-        # regime = self.spectral_classifier.predict(features)
-        # For now, fall back to previous regime or default:
-        return self._regime_state.get(qid, 0)
+        try:
+            features = extract_features(question)
+            features_reshaped = features.reshape(1, -1)
+            regime = int(self.regime_model.predict(features_reshaped)[0])
+
+            if regime not in range(self.n_regimes):
+                print(f"REGIME Invalid regime {regime}, defaulting to 0")
+                regime = 0
+
+            qid = question.page_url or question.page_url
+            self._regime_state[qid] = regime
+
+            anchors = self._regime_anchors.get(regime, {})
+            print(f"REGIME Question {question.question_text[:80]}")
+            print(f"REGIME Features {features}")
+            print(f"REGIME Regime {regime}")
+            print(f"REGIME Anchors {anchors}")
+
+            return regime
+
+        except Exception as e:
+            print(f"ERROR getcurrentregime failed {e}")
+            return 0
+
 
     def _forecast_next_regime_probs(self, current_regime: int) -> dict[int, float]:
         """
