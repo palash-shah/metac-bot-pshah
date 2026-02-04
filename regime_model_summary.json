@@ -1,42 +1,75 @@
 {
-  "n_regimes": 2,
+  "n_regimes": 3,
   "transition_matrix": {
     "0": {
-      "0": 0.9,
-      "1": 0.1
+      "0": 0.85,
+      "1": 0.1,
+      "2": 0.05
     },
     "1": {
       "0": 0.1,
-      "1": 0.9
+      "1": 0.85,
+      "2": 0.05
+    },
+    "2": {
+      "0": 0.05,
+      "1": 0.1,
+      "2": 0.85
     }
   },
   "regime_anchors": {
     "0": {
-      "binary_default": 0.5,
-      "numeric_scale": 1.0,
+      "binary_default": 0.32499999999999996,
+      "binary_mean": 0.3530999999999999,
+      "binary_std": 0.2298923443701421,
+      "numeric_scale": 1.2298923443701422,
       "numeric_shift": 0.0,
       "multiple_choice_confidence": 0.35,
-      "sample_size": 18,
-      "mean_forecast": 0.4722222222222222,
-      "std_forecast": 0.2402904620929418
+      "sample_size": 15,
+      "avg_time_horizon_days": 365,
+      "median_time_horizon_days": 365,
+      "avg_crowd_size": 1065.8666666666666,
+      "avg_complexity": 14.066666666666666,
+      "confidence_weight": 0.39375
     },
     "1": {
-      "binary_default": 0.5,
+      "binary_default": 0.36,
+      "binary_mean": 0.4471428571428572,
+      "binary_std": 0.407140350869479,
+      "numeric_scale": 1.4071403508694789,
+      "numeric_shift": 0.0,
+      "multiple_choice_confidence": 0.35,
+      "sample_size": 7,
+      "avg_time_horizon_days": 365,
+      "median_time_horizon_days": 365,
+      "avg_crowd_size": 1563.0,
+      "avg_complexity": 12.857142857142858,
+      "confidence_weight": 0.34375
+    },
+    "2": {
+      "binary_default": 0.35,
+      "binary_mean": 0.35,
+      "binary_std": 0.2,
       "numeric_scale": 1.0,
       "numeric_shift": 0.0,
       "multiple_choice_confidence": 0.35,
-      "sample_size": 14,
-      "mean_forecast": 0.3867857142857143,
-      "std_forecast": 0.16179359804190938
+      "sample_size": 10,
+      "avg_time_horizon_days": 365,
+      "median_time_horizon_days": 365,
+      "avg_crowd_size": 56.5,
+      "avg_complexity": 14.8,
+      "confidence_weight": 0.3625
     }
   },
   "training_questions": 32,
-  "training_timestamp": "2026-01-14T13:41:16.670472",
+  "training_timestamp": "2026-02-03T19:20:17.025669",
   "feature_names": [
-    "community_forecast",
-    "volatility",
+    "time_horizon",
     "age",
-    "activity",
-    "crowd_size"
+    "crowd_size",
+    "community_confidence",
+    "complexity",
+    "type",
+    "activity_rate"
   ]
 }

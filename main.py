@@ -47,78 +47,116 @@ logger = logging.getLogger(__name__)
 
 _OPENAI_CLIENT = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+def extremize(p: float, alpha: float = 0.3) -> float:
+    """
+    Push probability away from 0.5 to reduce regression to the mean.
+
+    This addresses the "wisdom of crowds" bias where aggregated predictions
+    tend to cluster around 50%. By extremizing, we push confident predictions
+    further from 50% while leaving uncertain predictions closer to 50%.
+
+    Args:
+        p: probability (0-1)
+        alpha: extremization strength (0 = no change, 1 = full extremization)
+               Recommended range: 0.2-0.5
+
+    Returns:
+        extremized probability, clamped to [0.01, 0.99]
+
+    Examples:
+        extremize(0.6, 0.3) ≈ 0.64  # Push 60% toward 70%
+        extremize(0.9, 0.3) ≈ 0.93  # Push 90% toward 95%
+        extremize(0.5, 0.3) = 0.5   # 50% stays at 50%
+    """
+    if p > 0.5:
+        extremized = 0.5 + ((p - 0.5) ** (1 - alpha))
+    else:
+        extremized = 0.5 - ((0.5 - p) ** (1 - alpha))
+
+    # Clamp to valid probability range
+    return max(0.01, min(0.99, extremized))
+
 def extract_features(question: MetaculusQuestion) -> np.ndarray:
     """
-    Map a MetaculusQuestion into the 5D feature vector used by the spectral model.
+    Map a MetaculusQuestion into the 7D feature vector used by the spectral model.
     This mirrors build_regime_params.py but works on MetaculusQuestion objects.
+
+    Features:
+    1. Time horizon (0-1): days until resolution / 730 days
+    2. Question age (0-1): days since published / 365 days
+    3. Crowd size (0-1): log10(num_predictions) / 3.0
+    4. Community confidence (0-1): distance from 0.5 * 2
+    5. Complexity (0-1): (word_count - 50) / 150
+    6. Question type (0/0.5/1): binary/numeric/multiple_choice
+    7. Activity rate (0-1): predictions_per_day / 5.0
     """
 
-    # We will construct a dict similar to what training used.
-    # 1) Community prediction series proxy
-    community_values: list[float] = []
-
-    # For binary questions, use single CP at access time if present (0-1 => 0-100)
-    if isinstance(question, BinaryQuestion) and question.community_prediction_at_access_time is not None:
-        community_values = [question.community_prediction_at_access_time * 100.0]
-
-    # Optional: if you later store a richer history in custom_metadata, use it here
-    try:
-        if not community_values and hasattr(question, "custom_metadata"):
-            cp_hist = question.custom_metadata.get("community_prediction_history", [])
-            if isinstance(cp_hist, list):
-                community_values = cp_hist
-    except Exception:
-        pass
-
-    # 2) Created / published time
-    created_str = ""
-    if getattr(question, "published_time", None) is not None:
-        created_str = question.published_time.isoformat()
-
-    # 3) Activity count proxy
-    activity_count = getattr(question, "num_predictions", None) or 0
-
-    # ---- Feature 1: community_forecast (0-1)
-    if community_values and len(community_values) > 0:
-        latest = community_values[-1]
-        community_forecast = latest / 100.0 if isinstance(latest, (int, float)) else 0.5
-    else:
-        community_forecast = 0.5
-    community_forecast = max(0.0, min(1.0, community_forecast))
-
-    # ---- Feature 2: volatility (0-1)
-    if community_values and len(community_values) > 3:
-        recent = np.array(community_values[-10:]) / 100.0
-        volatility = float(np.std(recent))
-        volatility = min(1.0, volatility)
-    else:
-        volatility = 0.1
-
-    # ---- Feature 3: age (0-1)
-    if created_str:
+    # Feature 1: Time horizon (days until resolution)
+    time_horizon = 0.5  # default for unknown
+    if hasattr(question, 'resolve_time') and question.resolve_time:
         try:
-            created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-            now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
-            age_days = (now - created).days
+            now = datetime.now(timezone.utc)
+            days_to_resolution = (question.resolve_time - now).days
+            # Normalize: 0 days = 0, 730 days (2 years) = 1.0
+            time_horizon = min(1.0, max(0.0, days_to_resolution / 730.0))
+        except Exception:
+            time_horizon = 0.5
+
+    # Feature 2: Question age (days since published)
+    age = 0.5
+    if hasattr(question, 'published_time') and question.published_time:
+        try:
+            now = datetime.now(question.published_time.tzinfo) if question.published_time.tzinfo else datetime.now()
+            age_days = (now - question.published_time).days
+            # Normalize: 0 days = 0, 365 days = 1.0
             age = min(1.0, max(0.0, age_days / 365.0))
         except Exception:
             age = 0.5
+
+    # Feature 3: Crowd size (log scale)
+    n_preds = getattr(question, 'num_predictions', 0) or 0
+    if n_preds > 0:
+        # Log scale: 1 predictor = 0, 10 = 0.33, 100 = 0.67, 1000 = 1.0
+        crowd_size = min(1.0, np.log10(n_preds) / 3.0)
     else:
-        age = 0.5
+        crowd_size = 0.0
 
-    # ---- Feature 4: activity (0-1)
-    if community_values and len(community_values) > 0:
-        activity = min(1.0, max(0.0, len(community_values) / 100.0))
+    # Feature 4: Community confidence (distance from 0.5)
+    community_confidence = 0.0
+    if isinstance(question, BinaryQuestion) and question.community_prediction_at_access_time is not None:
+        p = question.community_prediction_at_access_time
+        # Distance from 0.5, scaled to 0-1
+        community_confidence = abs(p - 0.5) * 2.0
+
+    # Feature 5: Question complexity (word count proxy)
+    text = question.question_text + (question.resolution_criteria or "")
+    word_count = len(text.split())
+    # Normalize: 50 words = 0 (simple), 200+ words = 1.0 (complex)
+    complexity = min(1.0, max(0.0, (word_count - 50) / 150))
+
+    # Feature 6: Question type encoding
+    if isinstance(question, BinaryQuestion):
+        type_encoding = 0.0
+    elif isinstance(question, NumericQuestion):
+        type_encoding = 0.5
+    elif isinstance(question, MultipleChoiceQuestion):
+        type_encoding = 1.0
     else:
-        activity = 0.1
+        type_encoding = 0.25  # Unknown/other types
 
-    # ---- Feature 5: crowd_size (0-1)
-    crowd_size = min(1.0, max(0.0, activity_count / 50.0))
+    # Feature 7: Activity rate (predictions per day)
+    age_days = max(1, age * 365)  # Avoid division by zero
+    activity_rate = min(1.0, n_preds / age_days / 5.0)  # 5 predictions/day = 1.0
 
-    return np.array(
-        [community_forecast, volatility, age, activity, crowd_size],
-        dtype=np.float32,
-    )
+    return np.array([
+        time_horizon,
+        age,
+        crowd_size,
+        community_confidence,
+        complexity,
+        type_encoding,
+        activity_rate
+    ], dtype=np.float32)
 
 class RegimeModel:
     """
@@ -351,8 +389,8 @@ class SpringTemplateBot2026(ForecastBot):
         """
         row = self._regime_transition.get(current_regime)
         if not row:
-            # uniform fallback
-            return {k: 1.0 for k in (0,)}
+            # uniform fallback for 3 regimes
+            return {k: 1.0 / self.n_regimes for k in range(self.n_regimes)}
         return row
 
     def _regime_weighted_binary_anchor(self, regime_probs: dict[int, float]) -> float:
@@ -507,10 +545,14 @@ class SpringTemplateBot2026(ForecastBot):
         anchor_prob: float = self._regime_weighted_binary_anchor(next_regime_probs)
 
         llm_p: float = float(base_prediction.prediction_value)
-        alpha: float = 0.3  # weight on regime prior; tune offline
+        alpha: float = 0.45  # weight on regime prior; increased from 0.3 to use regime model more
 
         blended_p: float = alpha * anchor_prob + (1.0 - alpha) * llm_p
         blended_p = max(0.01, min(0.99, blended_p))
+
+        # Apply extremization to reduce overconfidence regression to mean
+        # Use alpha=0.30 for more aggressive extremization
+        extremized_p: float = extremize(blended_p, alpha=0.30)
 
         # update internal regime state for this question id
         if next_regime_probs:
@@ -524,11 +566,12 @@ class SpringTemplateBot2026(ForecastBot):
         reasoning = (
             base_prediction.reasoning
             + f"\n\n[Regime ensemble] Current regime {current_regime}, "
-            f"anchor={anchor_prob:.3f}, LLM={llm_p:.3f}, blended={blended_p:.3f}."
+            f"anchor={anchor_prob:.3f}, LLM={llm_p:.3f}, blended={blended_p:.3f}, "
+            f"extremized={extremized_p:.3f}."
         )
 
         return ReasonedPrediction(
-            prediction_value=blended_p,
+            prediction_value=extremized_p,
             reasoning=reasoning,
         )
 
@@ -628,7 +671,7 @@ class SpringTemplateBot2026(ForecastBot):
                 prior_k = float(anchors.get(key, 1.0 / len(options)))
                 prior[opt.option_name] += pi_k * prior_k
 
-        alpha: float = 0.3  # weight on regime prior
+        alpha: float = 0.45  # weight on regime prior; increased from 0.3 to use regime model more
         blended: dict[str, float] = {}
         for name in prior:
             blended[name] = alpha * prior[name] + (1.0 - alpha) * p_llm[name]
