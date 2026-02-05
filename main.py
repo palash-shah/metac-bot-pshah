@@ -45,7 +45,10 @@ from openai import OpenAI
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-_OPENAI_CLIENT = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_OPENAI_CLIENT = OpenAI(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1"
+)
 
 def extremize(p: float, alpha: float = 0.3) -> float:
     """

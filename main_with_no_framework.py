@@ -255,15 +255,15 @@ CONCURRENT_REQUESTS_LIMIT = 5
 llm_rate_limiter = asyncio.Semaphore(CONCURRENT_REQUESTS_LIMIT)
 
 
-async def call_llm(prompt: str, model: str = "gpt-4o", temperature: float = 0.3) -> str:
+async def call_llm(prompt: str, model: str = "openai/gpt-4o", temperature: float = 0.3) -> str:
     """
-    Makes a streaming completion request to OpenAI's API with concurrent request limiting.
+    Makes a streaming completion request to OpenRouter's API with concurrent request limiting.
     """
 
-    # Remove the base_url parameter to call the OpenAI API directly
-    # Also checkout the package 'litellm' for one function that can call any model from any provider
-    # Also checkout OpenRouter for allowing one API key for many providers (especially powerful if combined with litellm)
-    client = AsyncOpenAI()
+    client = AsyncOpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1"
+    )
 
     async with llm_rate_limiter:
         response = await client.chat.completions.create(
